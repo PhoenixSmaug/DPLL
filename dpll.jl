@@ -187,46 +187,83 @@ end
 """
     selectVar(variables)
 
-Heuristic to select next variable to be assigned and which value to assign
+DLIS heuristic to select next variable to be assigned and which value to assign
 
 # Arguments
 - `variables`: Vector of variables
+- `clauses`: Vector of clauses
 """
-function selectVar(variables::Vector{Var})
-    for var in variables
-        if var.value == :Free
-            return var, :One
+function selectVar(variables::Vector{Var}, clauses::Vector{Clause})
+    maxOccurrence = -1
+    selectedVar = nothing
+    selectedValue = :One  # Default value, in case all variables are assigned
+
+    posLiteralCounts = Dict{Int, Int}()
+    negLiteralCounts = Dict{Int, Int}()
+
+    for clause in clauses
+        for lit in clause.lits
+            # Only consider literals from clauses that are not yet satisfied
+            if isnothing(clause.isSat)
+                varIdx = lit.varIdx
+                var = variables[varIdx]
+                if var.value == :Free
+                    if lit.isPos
+                        posLiteralCounts[varIdx] = get(posLiteralCounts, varIdx, 0) + 1  # start at 0 if entry at varIdx does not exist yet
+                        
+                        if posLiteralCounts[varIdx] > maxOccurrence
+                            maxOccurrence = posLiteralCounts[varIdx]
+                            selectedVar = var
+                            selectedValue = :One
+                        end
+                    else
+                        negLiteralCounts[varIdx] = get(negLiteralCounts, varIdx, 0) + 1
+
+                        if negLiteralCounts[varIdx] > maxOccurrence
+                            maxOccurrence = negLiteralCounts[varIdx]
+                            selectedVar = var
+                            selectedValue = :Zero
+                        end
+                    end
+                end
+            end
         end
     end
-    return nothing, :One
+
+    return selectedVar, selectedValue
 end
 
 
 """
-    dpll!(variables, clauses)
+    dpll!(variables, clauses, timeout)
 
 DPLL algorithm to solve the CNF formula encoded in variables and clauses
 
 # Arguments
 - `variables`: Vector of variables
 - `clauses`: Vector of clauses
+- `timeout`: Timeout in seconds
 """
-function dpll!(variables::Vector{Var}, clauses::Vector{Clause})
+function dpll!(variables::Vector{Var}, clauses::Vector{Clause}, timeout::Int)
     assignmentStack = Var[]
+    startTime = time()
 
     while true
-        #debugPrint(variables, clauses) # TEMP
-        var, value = selectVar(variables)
+        # Check for timeout
+        if time() - startTime > timeout
+            return false, true
+        end
+        
+        var, value = selectVar(variables, clauses)
 
-        # all variables are assigned without conflict, so satisfying assignment is found
+        # All variables are assigned without conflict, so satisfying assignment is found
         if isnothing(var) 
-            #debugPrint(variables) # TEMP
-            return true
+            return true, false
         end
 
         if !assign!(var, value, false, clauses, assignmentStack)
             if !backtrack!(clauses, assignmentStack)
-                return false
+                return false, false
             end
             continue
         end
@@ -346,18 +383,23 @@ Read CNF file, solve it using DPLL and write solution to result file
 # Arguments
 - `cnfPath`: Relative or absolute path of CNF file
 - `resPath`: Relative or absolute path of result file
+- `timeout`: Timeout in seconds
 """
-function main(cnfPath::String, resPath::String)
+function main(cnfPath::String, resPath::String, timeout::Int)
     variables, clauses = importCNF(cnfPath)
     
-    satisfiable = dpll!(variables, clauses)
+    satisfiable, timedOut = dpll!(variables, clauses, timeout)
 
-    exportResult(variables, resPath, satisfiable)
+    if !timedOut
+        exportResult(variables, resPath, satisfiable)
 
-    if satisfiable
-        println("Satisfiable")
+        if satisfiable
+            println("Satisfiable")
+        else
+            println("Unsatisfiable")
+        end
     else
-        println("Unsatisfiable")
+        println("Timed out.")
     end
 end
 
@@ -372,7 +414,7 @@ function runTestInstances()
         if endswith(file, ".cnf")
             println("Processing file: $file")
             fileRes = replace(file, r"\.cnf$" => ".txt")
-            main(file, fileRes)
+            main(file, fileRes, 3)
         end
     end
 
@@ -380,7 +422,7 @@ function runTestInstances()
         if endswith(file, ".cnf")
             println("Processing file: $file")
             fileRes = replace(file, r"\.cnf$" => ".txt")
-            main(file, fileRes)
+            main(file, fileRes, 3)
         end
     end
 end
