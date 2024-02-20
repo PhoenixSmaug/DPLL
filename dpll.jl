@@ -246,16 +246,17 @@ end
 
 
 """
-    selectVar(variables, clauses)
+    selectVar!(variables, clauses, forceQueue)
 
 Select next value to be assigned and value to assign. Use DLIS heuristic, so choose free literal
-occurring most often in unsatisfied clauses.
+occurring most often in unsatisfied clauses. Also add pure literals to force queue
 
 # Arguments
 - `variables`: Vector of variables
 - `clauses`: Vector of clauses
+- `forceQueue`: Vector as FIFO queue of forced literals (by unit propagation or pure literal elimination)
 """
-function selectVar(variables::Vector{Var}, clauses::Vector{Clause})
+function selectVar!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue::Vector{Lit})
     maxOccurrence = -1
     selectedVar = nothing
     selectedValue = :One  # Default value, in case all variables are assigned
@@ -292,6 +293,19 @@ function selectVar(variables::Vector{Var}, clauses::Vector{Clause})
         end
     end
 
+    # reuse dictionaries to search for pure literals
+    for varIdx in union(keys(posLiteralCounts), keys(negLiteralCounts))
+        isPure = (get(posLiteralCounts, varIdx, 0) > 0) != (get(negLiteralCounts, varIdx, 0) > 0)  # exactly one is empty
+
+        if isPure
+            if get(posLiteralCounts, varIdx, 0) > 0
+                push!(forceQueue, Lit(varIdx, true))
+            elseif get(negLiteralCounts, varIdx, 0) > 0
+                push!(forceQueue, Lit(varIdx, false))
+            end
+        end
+    end
+
     return selectedVar, selectedValue
 end
 
@@ -311,24 +325,18 @@ function dpll!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue::Vect
     assignmentStack = Var[]
     startTime = time()
 
-    #debugPrint(variables, clauses)  # TEMP
-    #println(forceQueue)
-
     # initial forced propagation
     if !forced_prop!(variables, clauses, forceQueue, assignmentStack)
         return false, time() - startTime  # unsatisfiable
     end
 
     while true
-        #debugPrint(variables, clauses) # TEMP
-        #println(forceQueue)
-
         # Check for timeout
         if time() - startTime > timeout
             return false, nothing  # timed out
         end
         
-        var, value = selectVar(variables, clauses)
+        var, value = selectVar!(variables, clauses, forceQueue)
 
         # All variables are assigned without conflict, so satisfying assignment is found
         if isnothing(var) 
@@ -435,35 +443,6 @@ function exportResult(variables::Vector{Var}, filepath::String, satisfiable::Boo
 end
 
 
-function debugPrint(variables::Vector{Var})
-    assignedVars = Int[]
-    for (idx, var) in enumerate(variables)
-        if var.value == :One
-            push!(assignedVars, idx)
-        elseif var.value == :Zero
-            push!(assignedVars, -idx)
-        end
-    end
-    println("Assigned Variables: ", assignedVars)
-end
-
-function debugPrint(variables::Vector{Var}, clauses::Vector{Clause})
-    assignedVars = Int[]
-    for (idx, var) in enumerate(variables)
-        if var.value == :One
-            push!(assignedVars, idx)
-        elseif var.value == :Zero
-            push!(assignedVars, -idx)
-        end
-    end
-    println("Assigned Variables: ", assignedVars)
-
-    satisfiedClauses = [clause.act for (idx, clause) in enumerate(clauses) if !isnothing(clause.isSat)]
-    #satisfiedClauses = [(idx, clause.act) for (idx, clause) in enumerate(clauses) if !isnothing(clause.isSat)]
-    println("Satisfied Clauses: ", satisfiedClauses)
-end
-
-
 """
     main(filepath)
 
@@ -484,9 +463,9 @@ function main(cnfPath::String, resPath::String, timeout::Int)
 
         timeStr = string(round(time, digits=2))
         if satisfiable
-            println("Satisfiable: " * timeStr  * "s")
+            println("Satisfiable: " * timeStr * "s")
         else
-            println("Unsatisfiable: " * timeStr  * "s")
+            println("Unsatisfiable: " * timeStr * "s")
         end
     else
         println("Timed out.")
@@ -500,24 +479,43 @@ end
 Run test instances and print results
 """
 function runTestInstances()
-    for file in readdir("input/test/sat", join=true)
-        if endswith(file, ".cnf")
-            println("Processing file: $file")
-            fileRes = replace(file, r"\.cnf$" => ".txt")
-            main(file, fileRes, 3)
+    easyInstances = true
+    if easyInstances
+        for file in readdir("input/test/sat", join=true)
+            if endswith(file, ".cnf")
+                println("Processing file: $file")
+                fileRes = replace(file, r"\.cnf$" => ".txt")
+                main(file, fileRes, 3)
+            end
         end
-    end
 
-    for file in readdir("input/test/unsat", join=true)
-        if endswith(file, ".cnf")
-            println("Processing file: $file")
-            fileRes = replace(file, r"\.cnf$" => ".txt")
-            main(file, fileRes, 3)
+        for file in readdir("input/test/unsat", join=true)
+            if endswith(file, ".cnf")
+                println("Processing file: $file")
+                fileRes = replace(file, r"\.cnf$" => ".txt")
+                main(file, fileRes, 3)
+            end
+        end
+    else
+        for file in readdir("input/sat", join=true)
+            if endswith(file, ".cnf")
+                println("Processing file: $file")
+                fileRes = replace(file, r"\.cnf$" => ".txt")
+                main(file, fileRes, 10)
+            end
+        end
+
+        for file in readdir("input/unsat", join=true)
+            if endswith(file, ".cnf")
+                println("Processing file: $file")
+                fileRes = replace(file, r"\.cnf$" => ".txt")
+                main(file, fileRes, 10)
+            end
         end
     end
 end
 
+
 runTestInstances()
-#main("input/test/unsat/tent2_2.cnf", "test.txt", 10)
 
 # (c) Mia Muessig
