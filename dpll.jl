@@ -316,7 +316,7 @@ function dpll!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue::Vect
 
     # initial forced propagation
     if !forced_prop!(variables, clauses, forceQueue, assignmentStack)
-        return false, false  # unsatisfiable
+        return false, time() - startTime  # unsatisfiable
     end
 
     while true
@@ -325,20 +325,20 @@ function dpll!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue::Vect
 
         # Check for timeout
         if time() - startTime > timeout
-            return false, true  # timed out
+            return false, nothing  # timed out
         end
         
         var, value = selectVar(variables, clauses)
 
         # All variables are assigned without conflict, so satisfying assignment is found
         if isnothing(var) 
-            return true, false  # satisfied
+            return true, time() - startTime  # satisfied
         end
 
         if !assign!(var, value, false, forceQueue, variables, clauses, assignmentStack)
             # conflict in assignment
             if !backtrack!(variables, clauses, forceQueue, assignmentStack)
-                return false, false  # unsatisfiable
+                return false, time() - startTime  # unsatisfiable
             end
             continue
         end
@@ -346,7 +346,7 @@ function dpll!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue::Vect
         if !forced_prop!(variables, clauses, forceQueue, assignmentStack)
             # conflict in forced propagation
             if !backtrack!(variables, clauses, forceQueue, assignmentStack)
-                return false, false  # unsatisfiable
+                return false, time() - startTime  # unsatisfiable
             end
             continue
         end
@@ -477,15 +477,16 @@ Read CNF file, solve it using DPLL and write solution to result file
 function main(cnfPath::String, resPath::String, timeout::Int)
     variables, clauses, forceQueue = importCNF(cnfPath)
     
-    satisfiable, timedOut = dpll!(variables, clauses, forceQueue, timeout)
+    satisfiable, time = dpll!(variables, clauses, forceQueue, timeout)
 
-    if !timedOut
+    if !isnothing(time)
         exportResult(variables, resPath, satisfiable)
 
+        timeStr = string(round(time, digits=2))
         if satisfiable
-            println("Satisfiable")
+            println("Satisfiable: " * timeStr  * "s")
         else
-            println("Unsatisfiable")
+            println("Unsatisfiable: " * timeStr  * "s")
         end
     else
         println("Timed out.")
