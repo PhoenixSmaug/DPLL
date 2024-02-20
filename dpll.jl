@@ -50,7 +50,7 @@ end
 
 
 """
-    assign!(var, value, isForced, clauses, assignmentStack)
+    assign!(var, value, isForced, forceQueue, variables, clauses, assignmentStack)
 
 Assign value to variable and check for conflict
 
@@ -58,10 +58,12 @@ Assign value to variable and check for conflict
 - `var`: Variable to assign
 - `value`: Value to be assigned, either :One or :Zero
 - `isForced`: If variable is forced by unit or pure literal elimination
+- `forceQueue`: Vector as FIFO queue of forced literals (by unit propagation or pure literal elimination)
+- `variables`: Vector of variables
 - `clauses`: Vector of clauses
 - `assignmentStack`: Stack of currently assigned variables
 """
-function assign!(var::Var, value::Symbol, isForced::Bool, clauses::Vector{Clause}, assignmentStack::Vector{Var})
+function assign!(var::Var, value::Symbol, isForced::Bool, forceQueue::Vector{Lit}, variables::Vector{Var}, clauses::Vector{Clause}, assignmentStack::Vector{Var})
     var.isForced = isForced
     var.value = value
     push!(assignmentStack, var)
@@ -75,6 +77,13 @@ function assign!(var::Var, value::Symbol, isForced::Bool, clauses::Vector{Clause
                 clauses[cIdx].act -= 1
                 if clauses[cIdx].act == 0
                     noConflict = false
+                elseif clauses[cIdx].act == 1  # unit clause
+                    # find last active literal and add to foreced queue
+                    for lit in clauses[cIdx].lits
+                        if variables[lit.varIdx].value == :Free
+                            push!(forceQueue, lit)
+                        end
+                    end
                 end
             end
         end
@@ -92,6 +101,13 @@ function assign!(var::Var, value::Symbol, isForced::Bool, clauses::Vector{Clause
                 clauses[cIdx].act -= 1
                 if clauses[cIdx].act == 0
                     noConflict = false
+                elseif clauses[cIdx].act == 1  # unit clause
+                    # find last active literal and add to foreced queue
+                    for lit in clauses[cIdx].lits
+                        if variables[lit.varIdx].value == :Free
+                            push!(forceQueue, lit)
+                        end
+                    end
                 end
             end
         end
@@ -152,16 +168,18 @@ end
 
 
 """
-    backtrack!(clauses, assignmentStack)
+    backtrack!(variables, clauses, forceQueue, assignmentStack)
 
 Reverse assignments on the assignment stack until an unforced variable is found, where the inverse assignment
 does not result in a conflict.
 
 # Arguments
+- `variables`: Vector of variables
 - `clauses`: Vector of clauses
+- `forceQueue`: Vector as FIFO queue of forced literals (by unit propagation or pure literal elimination) 
 - `assignmentStack`: Stack of currently assigned variables
 """
-function backtrack!(clauses::Vector{Clause}, assignmentStack::Vector{Var})
+function backtrack!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue::Vector{Lit}, assignmentStack::Vector{Var})
     while !isempty(assignmentStack)
         # reverse last assignment
         var = pop!(assignmentStack)
@@ -170,12 +188,18 @@ function backtrack!(clauses::Vector{Clause}, assignmentStack::Vector{Var})
 
         # variable was choosen and not forced
         if !var.isForced
+            empty!(forceQueue)  # clear unit queue
+
             newValue = valueToUnassign == :Zero ? :One : :Zero
 
-            if assign!(var, newValue, true, clauses, assignmentStack)
-                return true
+            if assign!(var, newValue, true, forceQueue, variables, clauses, assignmentStack)
+                if forced_prop!(variables, clauses, forceQueue, assignmentStack)
+                    return true
+                end
+
+                continue  # Forced propagation of assignments also leads to conflict, backtrack further
             else
-                continue  # Inverse assignments also needs to conflict, backtrack further
+                continue  # Inverse assignments also leads to conflict, backtrack further
             end
         end
     end
@@ -185,9 +209,47 @@ end
 
 
 """
-    selectVar(variables)
+    forced_prop!(variables, clauses, forceQueue, assignmentStack)
 
-DLIS heuristic to select next variable to be assigned and which value to assign
+Assing forced variables from queue and stop at possible conflicts
+
+# Arguments
+- `variables`: Vector of variables
+- `clauses`: Vector of clauses
+- `forceQueue`: Vector as FIFO queue of forced literals (by unit propagation or pure literal elimination) 
+- `assignmentStack`: Stack of currently assigned variables
+"""
+function forced_prop!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue::Vector{Lit}, assignmentStack::Vector{Var})
+    noConflict = true
+
+    while !isempty(forceQueue)
+        forceLit = pop!(forceQueue)
+        forceVar = variables[forceLit.varIdx]
+
+        # Check if the variable was already propagated
+        if forceVar.value != :Free
+            continue
+        end
+
+        # Determine the value to assign based on the literal's sign
+        value = forceLit.isPos ? :One : :Zero
+
+        noConflict = assign!(forceVar, value, true, forceQueue, variables, clauses, assignmentStack)
+
+        if !noConflict
+            break
+        end
+    end
+
+    return noConflict
+end
+
+
+"""
+    selectVar(variables, clauses)
+
+Select next value to be assigned and value to assign. Use DLIS heuristic, so choose free literal
+occurring most often in unsatisfied clauses.
 
 # Arguments
 - `variables`: Vector of variables
@@ -235,35 +297,56 @@ end
 
 
 """
-    dpll!(variables, clauses, timeout)
+    dpll!(variables, clauses, forceQueue, timeout)
 
 DPLL algorithm to solve the CNF formula encoded in variables and clauses
 
 # Arguments
 - `variables`: Vector of variables
 - `clauses`: Vector of clauses
+- `forceQueue`: Vector as FIFO queue of forced literals (by unit propagation or pure literal elimination) 
 - `timeout`: Timeout in seconds
 """
-function dpll!(variables::Vector{Var}, clauses::Vector{Clause}, timeout::Int)
+function dpll!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue::Vector{Lit}, timeout::Int)
     assignmentStack = Var[]
     startTime = time()
 
+    #debugPrint(variables, clauses)  # TEMP
+    #println(forceQueue)
+
+    # initial forced propagation
+    if !forced_prop!(variables, clauses, forceQueue, assignmentStack)
+        return false, false  # unsatisfiable
+    end
+
     while true
+        #debugPrint(variables, clauses) # TEMP
+        #println(forceQueue)
+
         # Check for timeout
         if time() - startTime > timeout
-            return false, true
+            return false, true  # timed out
         end
         
         var, value = selectVar(variables, clauses)
 
         # All variables are assigned without conflict, so satisfying assignment is found
         if isnothing(var) 
-            return true, false
+            return true, false  # satisfied
         end
 
-        if !assign!(var, value, false, clauses, assignmentStack)
-            if !backtrack!(clauses, assignmentStack)
-                return false, false
+        if !assign!(var, value, false, forceQueue, variables, clauses, assignmentStack)
+            # conflict in assignment
+            if !backtrack!(variables, clauses, forceQueue, assignmentStack)
+                return false, false  # unsatisfiable
+            end
+            continue
+        end
+
+        if !forced_prop!(variables, clauses, forceQueue, assignmentStack)
+            # conflict in forced propagation
+            if !backtrack!(variables, clauses, forceQueue, assignmentStack)
+                return false, false  # unsatisfiable
             end
             continue
         end
@@ -282,6 +365,7 @@ Read file DIMACS CNF format
 function importCNF(filepath::String)
     variables = Var[]
     clauses = Clause[]
+    forceQueue = Lit[]
 
     open(filepath, "r") do file
         for line in eachline(file)
@@ -308,13 +392,17 @@ function importCNF(filepath::String)
                     else
                         push!(variables[varIndex].negOcc, length(clauses) + 1)
                     end
+
+                    if length(literals) == 2  # unit clause
+                        push!(forceQueue, Lit(varIndex, isPos))
+                    end
                 end
                 push!(clauses, Clause(clauseLits, nothing, length(clauseLits)))
             end
         end
     end
 
-    return variables, clauses
+    return variables, clauses, forceQueue
 end
 
 
@@ -370,7 +458,8 @@ function debugPrint(variables::Vector{Var}, clauses::Vector{Clause})
     end
     println("Assigned Variables: ", assignedVars)
 
-    satisfiedClauses = [(idx, clause.act) for (idx, clause) in enumerate(clauses) if !isnothing(clause.isSat)]
+    satisfiedClauses = [clause.act for (idx, clause) in enumerate(clauses) if !isnothing(clause.isSat)]
+    #satisfiedClauses = [(idx, clause.act) for (idx, clause) in enumerate(clauses) if !isnothing(clause.isSat)]
     println("Satisfied Clauses: ", satisfiedClauses)
 end
 
@@ -386,9 +475,9 @@ Read CNF file, solve it using DPLL and write solution to result file
 - `timeout`: Timeout in seconds
 """
 function main(cnfPath::String, resPath::String, timeout::Int)
-    variables, clauses = importCNF(cnfPath)
+    variables, clauses, forceQueue = importCNF(cnfPath)
     
-    satisfiable, timedOut = dpll!(variables, clauses, timeout)
+    satisfiable, timedOut = dpll!(variables, clauses, forceQueue, timeout)
 
     if !timedOut
         exportResult(variables, resPath, satisfiable)
@@ -428,5 +517,6 @@ function runTestInstances()
 end
 
 runTestInstances()
+#main("input/test/unsat/tent2_2.cnf", "test.txt", 10)
 
 # (c) Mia Muessig
