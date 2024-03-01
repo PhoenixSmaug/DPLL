@@ -14,7 +14,7 @@ end
 
 
 """
-    Var(value, posOcc, negOcc)
+    Var(value, posOcc, negOcc, actPosOcc, actNegOcc, isForced)
 
 Variable struct
 
@@ -22,12 +22,16 @@ Variable struct
 - `value`: Enum to store if variable is not (:Free), negatively (:Zero) or positively (:One) assigned
 - `posOcc`: Vector of clauses where the variable occurs as positive literal
 - `negOcc`: Vector of clauses where the variable occurs as negative literal
+- `actPosOcc`: Number of unsatisfied clauses where the variable occurs as positive literal (Used for pure literal elimination and DLIS)
+- `actNegOcc`: Number of unsatisfied clauses where the variable occurs as negative literal (Used for pure literal elimination and DLIS)
 - `isForced`: If variable is forced by unit or pure literal elimination
 """
 mutable struct Var
     value::Symbol
     posOcc::Set{Int}
     negOcc::Set{Int}
+    actPosOcc::Int
+    actNegOcc::Int
     isForced::Bool
 end
 
@@ -92,6 +96,25 @@ function assign!(var::Var, value::Symbol, isForced::Bool, forceQueue::Vector{Lit
         for cIdx in var.posOcc
             if isnothing(clauses[cIdx].isSat)
                 clauses[cIdx].isSat = var
+
+                # update active occurrences
+                for lit in clauses[cIdx].lits
+                    if variables[lit.varIdx].value == :Free
+                        if lit.isPos
+                            variables[lit.varIdx].actPosOcc -= 1
+
+                            if variables[lit.varIdx].actPosOcc == 0  # pure literal
+                                push!(forceQueue, Lit(lit.varIdx, false))
+                            end
+                        else
+                            variables[lit.varIdx].actNegOcc -= 1
+
+                            if variables[lit.varIdx].actNegOcc == 0  # pure literal
+                                push!(forceQueue, Lit(lit.varIdx, true))
+                            end
+                        end
+                    end
+                end
             end
         end
     elseif value == :Zero
@@ -116,6 +139,25 @@ function assign!(var::Var, value::Symbol, isForced::Bool, forceQueue::Vector{Lit
         for cIdx in var.negOcc
             if isnothing(clauses[cIdx].isSat)
                 clauses[cIdx].isSat = var
+            
+                # update active occurrences
+                for lit in clauses[cIdx].lits
+                    if variables[lit.varIdx].value == :Free
+                        if lit.isPos
+                            variables[lit.varIdx].actPosOcc -= 1
+
+                            if variables[lit.varIdx].actPosOcc == 0  # pure literal
+                                push!(forceQueue, Lit(lit.varIdx, false))
+                            end
+                        else
+                            variables[lit.varIdx].actNegOcc -= 1
+
+                            if variables[lit.varIdx].actNegOcc == 0  # pure literal
+                                push!(forceQueue, Lit(lit.varIdx, true))
+                            end
+                        end
+                    end
+                end
             end
         end
     end
@@ -125,20 +167,32 @@ end
 
 
 """
-    unassign!(var, clauses)
+    unassign!(var, variables, clauses)
 
 Unassign variable (set to :Free)
 
 # Arguments
 - `var`: Variable to unassign
+- `variables`: Vector of variables
 - `clauses`: Vector of clauses
 """
-function unassign!(var::Var, clauses::Vector{Clause})
+function unassign!(var::Var, variables::Vector{Var}, clauses::Vector{Clause})
     if var.value == :One
         # unsatisfy clauses
         for cIdx in var.posOcc
             if clauses[cIdx].isSat == var
                 clauses[cIdx].isSat = nothing
+
+                # update active occurrences
+                for lit in clauses[cIdx].lits
+                    if variables[lit.varIdx].value == :Free
+                        if lit.isPos
+                            variables[lit.varIdx].actPosOcc += 1
+                        else
+                            variables[lit.varIdx].actNegOcc += 1
+                        end
+                    end
+                end
             end
         end
 
@@ -153,6 +207,17 @@ function unassign!(var::Var, clauses::Vector{Clause})
         for cIdx in var.negOcc
             if clauses[cIdx].isSat == var
                 clauses[cIdx].isSat = nothing
+
+                # update active occurrences
+                for lit in clauses[cIdx].lits
+                    if variables[lit.varIdx].value == :Free
+                        if lit.isPos
+                            variables[lit.varIdx].actPosOcc += 1
+                        else
+                            variables[lit.varIdx].actNegOcc += 1
+                        end
+                    end
+                end
             end
         end
 
@@ -184,7 +249,7 @@ function backtrack!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue:
         # reverse last assignment
         var = pop!(assignmentStack)
         valueToUnassign = var.value
-        unassign!(var, clauses)
+        unassign!(var, variables, clauses)
 
         # variable was choosen and not forced
         if !var.isForced
@@ -249,7 +314,7 @@ end
     selectVar!(variables, clauses, forceQueue)
 
 Select next value to be assigned and value to assign. Use DLIS heuristic, so choose free literal
-occurring most often in unsatisfied clauses. Also add pure literals to force queue
+occurring most often in unsatisfied clauses.
 
 # Arguments
 - `variables`: Vector of variables
@@ -261,47 +326,19 @@ function selectVar!(variables::Vector{Var}, clauses::Vector{Clause}, forceQueue:
     selectedVar = nothing
     selectedValue = :One  # Default value, in case all variables are assigned
 
-    posLiteralCounts = Dict{Int, Int}()
-    negLiteralCounts = Dict{Int, Int}()
-
-    for clause in clauses
-        for lit in clause.lits
-            # Only consider literals from clauses that are not yet satisfied
-            if isnothing(clause.isSat)
-                varIdx = lit.varIdx
-                var = variables[varIdx]
-                if var.value == :Free
-                    if lit.isPos
-                        posLiteralCounts[varIdx] = get(posLiteralCounts, varIdx, 0) + 1  # start at 0 if entry at varIdx does not exist yet
-                        
-                        if posLiteralCounts[varIdx] > maxOccurrence
-                            maxOccurrence = posLiteralCounts[varIdx]
-                            selectedVar = var
-                            selectedValue = :One
-                        end
-                    else
-                        negLiteralCounts[varIdx] = get(negLiteralCounts, varIdx, 0) + 1
-
-                        if negLiteralCounts[varIdx] > maxOccurrence
-                            maxOccurrence = negLiteralCounts[varIdx]
-                            selectedVar = var
-                            selectedValue = :Zero
-                        end
-                    end
-                end
+    # Iterate through variables to apply DLIS heuristic and find pure literals
+    for varIdx in 1:length(variables)
+        var = variables[varIdx]
+        if var.value == :Free
+            if var.actPosOcc > maxOccurrence
+                maxOccurrence = var.actPosOcc
+                selectedVar = var
+                selectedValue = :One
             end
-        end
-    end
-
-    # reuse dictionaries to search for pure literals
-    for varIdx in union(keys(posLiteralCounts), keys(negLiteralCounts))
-        isPure = (get(posLiteralCounts, varIdx, 0) > 0) != (get(negLiteralCounts, varIdx, 0) > 0)  # exactly one is empty
-
-        if isPure
-            if get(posLiteralCounts, varIdx, 0) > 0
-                push!(forceQueue, Lit(varIdx, true))
-            elseif get(negLiteralCounts, varIdx, 0) > 0
-                push!(forceQueue, Lit(varIdx, false))
+            if var.actNegOcc > maxOccurrence
+                maxOccurrence = var.actNegOcc
+                selectedVar = var
+                selectedValue = :Zero
             end
         end
     end
@@ -382,7 +419,7 @@ function importCNF(filepath::String)
             elseif startswith(line, "p")  # problem line
                 _, _, num_vars, _ = split(line)
                 for _ in 1 : parse(Int, num_vars)
-                    push!(variables, Var(:Free, Set{Int}(), Set{Int}(), false))
+                    push!(variables, Var(:Free, Set{Int}(), Set{Int}(), 0, 0, false))
                 end
             else  # clause line
                 literals = split(line)
@@ -397,8 +434,10 @@ function importCNF(filepath::String)
                     push!(clauseLits, Lit(varIndex, isPos))
                     if isPos
                         push!(variables[varIndex].posOcc, length(clauses) + 1)
+                        variables[varIndex].actPosOcc += 1
                     else
                         push!(variables[varIndex].negOcc, length(clauses) + 1)
+                        variables[varIndex].actNegOcc += 1
                     end
 
                     if length(literals) == 2  # unit clause
@@ -479,13 +518,13 @@ end
 Run test instances and print results
 """
 function runTestInstances()
-    easyInstances = true
+    easyInstances = false
     if easyInstances
         for file in readdir("input/test/sat", join=true)
             if endswith(file, ".cnf")
                 println("Processing file: $file")
                 fileRes = replace(file, r"\.cnf$" => ".txt")
-                main(file, fileRes, 3)
+                main(file, fileRes, 1)
             end
         end
 
@@ -493,7 +532,7 @@ function runTestInstances()
             if endswith(file, ".cnf")
                 println("Processing file: $file")
                 fileRes = replace(file, r"\.cnf$" => ".txt")
-                main(file, fileRes, 3)
+                main(file, fileRes, 1)
             end
         end
     else
@@ -501,7 +540,7 @@ function runTestInstances()
             if endswith(file, ".cnf")
                 println("Processing file: $file")
                 fileRes = replace(file, r"\.cnf$" => ".txt")
-                main(file, fileRes, 10)
+                main(file, fileRes, 5)
             end
         end
 
@@ -509,7 +548,7 @@ function runTestInstances()
             if endswith(file, ".cnf")
                 println("Processing file: $file")
                 fileRes = replace(file, r"\.cnf$" => ".txt")
-                main(file, fileRes, 10)
+                main(file, fileRes, 5)
             end
         end
     end
